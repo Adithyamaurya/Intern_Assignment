@@ -12,17 +12,12 @@ This document details the usage of AI coding tools in the development of the Uni
 ---
 
 ## What the AI Automated
+Simple summary of what the AI helped automate:
 
-1. **Custom Document Parser (`MarkdownRenderer.tsx`)**:
-   - Designed a sequential parsing pipeline that splits block code, block math (`$$`), inline math (`$`), inline code (`` ` ``), and headers, outputting pure, unescaped React elements.
-   - Handled markdown table parsing, aligning cells automatically based on the divider indicators (`|---|` vs `|:---|`).
-2. **Deterministic LCG Stream Generator (`mockStream.ts`)**:
-   - Translated the ESM `.mjs` generator logic into a fully typed TypeScript generator, ensuring compatibility with standard Vite compiler settings.
-3. **Concept Extraction & Status Engine (`conceptExtractor.ts` & `lessonHelpers.ts`)**:
-   - Curated a catalog of 26 machine learning concepts (including overarching topics like **Regularization** and outcomes like **Feature Selection**) mapped to lecture weeks and slides.
-   - Implemented prompt triggers (e.g. `confused`, `mix up`, `stuck`) to classify study states into `covered`, `needs_review`, and `unexplored` dynamically.
-4. **Learning Map Custom Flowchart (`LearningMap.tsx`)**:
-   - Automated the layout of the Regularization cluster, rendering it as a conceptual flowchart (`Regularization` ➔ `Overfitting` ➔ `L1/L2` ➔ `Feature Selection`) with responsive connecting lines and arrows.
+- Basic markdown rendering and KaTeX support (`MarkdownRenderer.tsx`).
+- A mock streaming generator for development and testing (`mockStream.ts`).
+- Helpers to extract and tag concepts from chat history (`conceptExtractor.ts`, `lessonHelpers.ts`).
+- Learning map layout and flowchart rendering (`LearningMap.tsx`).
 
 ---
 
