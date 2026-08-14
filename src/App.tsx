@@ -4,370 +4,196 @@ import { TutorView } from './components/TutorView';
 import { LearningMap } from './components/LearningMap';
 import { RevisionView } from './components/RevisionView';
 import { SourceViewer } from './components/SourceViewer';
-import type { Message, Lecture, Citation } from './types';
-import { INITIAL_CONVERSATION, EMPTY_CONVERSATION, formatSlideLocation, getSlideFromCitation } from './services/courseData';
+import { ContextPanel } from './components/ContextPanel';
+import type { Message, Lecture, Concept } from './types';
+import { INITIAL_CONVERSATION, EMPTY_CONVERSATION, getSlideFromCitation } from './services/courseData';
 import { streamResponse, getScenario } from './services/mockStream';
 import { extractConcepts } from './services/conceptExtractor';
-import { BookOpen, Compass, RotateCcw } from 'lucide-react';
+import {
+  getCurrentConceptFromMessages,
+  getContextPath,
+  getConceptChain,
+  extractRememberLine,
+} from './services/lessonHelpers';
 import 'katex/dist/katex.min.css';
 
 function App() {
   const [currentTab, setCurrentTab] = useState<'tutor' | 'revision' | 'map'>('tutor');
-  const [useEmptyState, setUseEmptyState] = useState<boolean>(false);
-
-  // Message states
+  const [useEmptyState, setUseEmptyState] = useState(true);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
-
-  // Active slide viewer states
   const [activeSlide, setActiveSlide] = useState<{ lecture: Lecture; slideNumber: number } | null>(null);
 
-  // Synchronize initial conversation vs empty conversation on load and toggle
   useEffect(() => {
-    if (useEmptyState) {
-      setMessages([...EMPTY_CONVERSATION.messages]);
-    } else {
-      setMessages([...INITIAL_CONVERSATION.messages]);
-    }
-    // Close active slide on reset/switch
+    setMessages(useEmptyState ? [...EMPTY_CONVERSATION.messages] : [...INITIAL_CONVERSATION.messages]);
     setActiveSlide(null);
   }, [useEmptyState]);
 
-  // Extract concepts dynamically from messages
-  const concepts = useMemo(() => {
-    return extractConcepts(messages);
+  const concepts = useMemo(() => extractConcepts(messages), [messages]);
+  const exploredCount = concepts.filter((c) => c.status !== 'unexplored').length;
+  const progressPercentage = concepts.length > 0 ? Math.round((exploredCount / concepts.length) * 100) : 0;
+
+  const lastAssistant = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i];
+    }
+    return null;
   }, [messages]);
 
-  // Calculate course stats
-  const totalConcepts = concepts.length;
-  const exploredCount = concepts.filter((c) => c.status !== 'unexplored').length;
-  const progressPercentage = totalConcepts > 0 ? Math.round((exploredCount / totalConcepts) * 100) : 0;
+  const currentConcept = useMemo(
+    () => getCurrentConceptFromMessages(messages, concepts),
+    [messages, concepts]
+  );
 
-  // Jump to specific message element in TutorView
-  const handleJumpToMessage = (msgId: string) => {
+  const contextPath = useMemo(() => {
+    if (!lastAssistant) return [];
+    const userQ = messages[messages.indexOf(lastAssistant) - 1]?.content;
+    return getContextPath(lastAssistant.citations ?? [], concepts, userQ).segments;
+  }, [lastAssistant, messages, concepts]);
+
+  const relatedConcepts = useMemo(() => {
+    if (!currentConcept) return [];
+    return getConceptChain(currentConcept, concepts).filter((c) => c.id !== currentConcept.id);
+  }, [currentConcept, concepts]);
+
+  const rememberLine = useMemo(() => {
+    if (!lastAssistant?.content) return null;
+    return extractRememberLine(lastAssistant.content, concepts);
+  }, [lastAssistant, concepts]);
+
+  const handleGoHome = () => {
+    setUseEmptyState(true);
+    setCurrentTab('tutor');
+    setActiveSlide(null);
+  };
+
+  const handleLoadDemo = () => {
+    setUseEmptyState(false);
+    setCurrentTab('tutor');
+  };
+
+  const handleConceptClick = (concept: Concept) => {
     setCurrentTab('tutor');
     setTimeout(() => {
-      // Find the message container element or scroll to it
-      const element = document.getElementById(`msg-${msgId}`);
-      if (element) {
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const c = document.getElementById('chat-composer') as HTMLTextAreaElement;
+      if (c) {
+        c.value = `Explain ${concept.name} and how it connects to the rest of the course.`;
+        c.focus();
+        c.dispatchEvent(new Event('input', { bubbles: true }));
       }
     }, 100);
   };
 
-  // Select slide source viewer
+  const handleJumpToMessage = (msgId: string) => {
+    setCurrentTab('tutor');
+    setTimeout(() => {
+      document.getElementById(`msg-${msgId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+  };
+
   const handleSelectSlide = (lecture: Lecture, slideNum: number) => {
     setActiveSlide({ lecture, slideNumber: slideNum });
   };
 
-  // Slide navigation callback
-  const handleNavigateSlide = (slideNum: number) => {
-    if (activeSlide) {
-      setActiveSlide({ ...activeSlide, slideNumber: slideNum });
-    }
-  };
-
-  // Match scenario ID from user question keywords
   const matchScenario = (query: string): string => {
-    const clean = query.toLowerCase().trim();
-
-    if (clean.includes('supervised') || clean.includes('unsupervised')) return 'plain';
-    if (clean.includes('gradient descent') || clean.includes('implement') || clean.includes('code')) return 'code';
-    if (clean.includes('sigmoid') || clean.includes('0.25') || clean.includes('derivative')) return 'math';
-    if (clean.includes('regularization') || clean.includes('lasso') || clean.includes('ridge') || clean.includes('l1') || clean.includes('l2')) return 'table';
-    if (clean.includes('backpropagation') || clean.includes('backprop') || clean.includes('explain everything')) return 'long';
-    if (clean.includes('exam') || clean.includes('final')) return 'refusal';
-    if (clean.includes('midterm') || clean.includes('solution')) return 'error-midstream';
-    if (clean.includes('summarise') || clean.includes('summary') || clean.includes('whole course')) return 'slow';
-
-    return 'plain'; // Default fallback
+    const c = query.toLowerCase().trim();
+    if (c.includes('supervised') || c.includes('unsupervised')) return 'plain';
+    if (c.includes('gradient descent') || c.includes('implement') || c.includes('code')) return 'code';
+    if (c.includes('sigmoid') || c.includes('0.25') || c.includes('derivative')) return 'math';
+    if (c.includes('regularization') || c.includes('lasso') || c.includes('ridge') || c.includes('l1') || c.includes('l2')) return 'table';
+    if (c.includes('backpropagation') || c.includes('backprop') || c.includes('explain everything')) return 'long';
+    if (c.includes('exam') || c.includes('final')) return 'refusal';
+    if (c.includes('midterm') || c.includes('solution')) return 'error-midstream';
+    if (c.includes('summarise') || c.includes('summary') || c.includes('whole course')) return 'slow';
+    return 'plain';
   };
 
-  // Streaming core lifecycle
   const handleSendMessage = async (text: string) => {
     if (isStreaming) return;
-
-    // Append user message
-    const userMsgId = 'user-' + Date.now();
-    const userMsg: Message = {
-      id: userMsgId,
-      role: 'user',
-      content: text,
-      created_at: new Date().toISOString(),
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
-
-    // Setup assistant streaming message placeholder
-    const assistantMsgId = 'assistant-' + Date.now();
-    const assistantMsg: Message = {
-      id: assistantMsgId,
-      role: 'assistant',
-      content: '', // Starts empty (triggers "Reviewing lecture materials..." in TutorView if delay is long)
-      created_at: new Date().toISOString(),
-      citations: [],
-    };
-
-    setMessages((prev) => [...prev, assistantMsg]);
+    const userMsg: Message = { id: 'user-' + Date.now(), role: 'user', content: text, created_at: new Date().toISOString() };
+    setMessages((p) => [...p, userMsg]);
+    const aid = 'assistant-' + Date.now();
+    setMessages((p) => [...p, { id: aid, role: 'assistant', content: '', created_at: new Date().toISOString(), citations: [] }]);
     setIsStreaming(true);
-
     const scenarioId = matchScenario(text);
-
     const controller = new AbortController();
     setAbortController(controller);
-
-    let accumulatedText = '';
-
+    let accumulated = '';
     try {
-      // Yield stream
       for await (const chunk of streamResponse(scenarioId, { signal: controller.signal })) {
-        accumulatedText += chunk;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMsgId ? { ...m, content: accumulatedText } : m
-          )
-        );
+        accumulated += chunk;
+        setMessages((p) => p.map((m) => m.id === aid ? { ...m, content: accumulated } : m));
       }
-
-      // Check if aborted
       if (controller.signal.aborted) {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantMsgId
-              ? { ...m, isCancelled: true, content: m.content || accumulatedText }
-              : m
-          )
-        );
-        setIsStreaming(false);
-        setAbortController(null);
+        setMessages((p) => p.map((m) => m.id === aid ? { ...m, isCancelled: true, content: m.content || accumulated } : m));
         return;
       }
-
-      // Generation completed successfully. Fetch citations
       const scenario = getScenario(scenarioId);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsgId
-            ? { ...m, content: scenario.text, citations: scenario.citations }
-            : m
-        )
-      );
-    } catch (err: any) {
-      // Stream failed partway (like error-midstream scenario)
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsgId
-            ? { ...m, content: accumulatedText, error: err.message || 'The connection to the tutor was lost.' }
-            : m
-        )
-      );
+      setMessages((p) => p.map((m) => m.id === aid ? { ...m, content: scenario.text, citations: scenario.citations } : m));
+    } catch {
+      setMessages((p) => p.map((m) => m.id === aid ? { ...m, content: accumulated, error: 'The explanation was interrupted.' } : m));
     } finally {
       setIsStreaming(false);
       setAbortController(null);
     }
   };
 
-  const handleStopGeneration = () => {
-    if (abortController) {
-      abortController.abort();
-    }
-  };
+  const sourcePanel = activeSlide ? (
+    <SourceViewer
+      lecture={activeSlide.lecture}
+      slideNumber={activeSlide.slideNumber}
+      onClose={() => setActiveSlide(null)}
+      onNavigateSlide={(n) => setActiveSlide((s) => s ? { ...s, slideNumber: n } : null)}
+    />
+  ) : null;
 
-  const handleRetryMessage = () => {
-    // Locate the last user query
-    const userMessages = messages.filter((m) => m.role === 'user');
-    if (userMessages.length === 0) return;
-    const lastUserQuery = userMessages[userMessages.length - 1].content;
-
-    // Delete the failed assistant message and its user message
-    setMessages((prev) => {
-      const copy = [...prev];
-      // remove last two (which are user and failed assistant)
-      copy.pop();
-      copy.pop();
-      return copy;
-    });
-
-    // Run query again
-    handleSendMessage(lastUserQuery);
-  };
-
-  // Find all citations currently present in the conversation
-  const activeThreadCitations = useMemo(() => {
-    const set = new Set<string>();
-    const list: Citation[] = [];
-    messages.forEach((m) => {
-      if (m.citations) {
-        m.citations.forEach((cit) => {
-          const key = `${cit.lecture}-${cit.slide}`;
-          if (!set.has(key)) {
-            set.add(key);
-            list.push(cit);
-          }
-        });
-      }
-    });
-    return list;
-  }, [messages]);
-
-  // Find concepts explored in the current thread (by matching thread citations)
-  const activeThreadConcepts = useMemo(() => {
-    return concepts.filter((c) => c.status !== 'unexplored');
-  }, [concepts]);
-
-  // Render the right-side context panel content
-  const renderRightPanelContent = () => {
-    if (activeSlide) {
-      return (
-        <SourceViewer
-          lecture={activeSlide.lecture}
-          slideNumber={activeSlide.slideNumber}
-          onClose={() => setActiveSlide(null)}
-          onNavigateSlide={handleNavigateSlide}
-        />
-      );
-    }
-
-    // Default right panel: current session grounding checklist
-    return (
-      <div className="flex flex-col h-full overflow-y-auto space-y-6 text-neutral-800 p-1 select-none">
-        <div className="border-b border-neutral-100 pb-3">
-          <span className="text-xxs uppercase tracking-wider font-semibold text-neutral-400 block mb-1">
-            Current Thread
-          </span>
-          <h3 className="font-serif text-base font-bold text-neutral-900 leading-tight">
-            Grounded Groundwork
-          </h3>
-        </div>
-
-        {/* Explore status */}
-        <div className="space-y-3">
-          <div className="flex items-center gap-1 text-xxs font-bold text-neutral-400 uppercase tracking-widest">
-            <Compass size={12} className="text-emerald-800" />
-            <span>Active Concepts</span>
-          </div>
-
-          {activeThreadConcepts.length > 0 ? (
-            <div className="flex flex-col gap-1.5">
-              {activeThreadConcepts.slice(0, 5).map((concept) => (
-                <div
-                  key={concept.id}
-                  className="flex items-center justify-between p-2 rounded bg-neutral-50/50 border border-neutral-200/50 text-xs"
-                >
-                  <span className="font-semibold text-neutral-700 truncate max-w-[150px]">
-                    {concept.name}
-                  </span>
-                  <span
-                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider ${
-                      concept.status === 'needs_review'
-                        ? 'bg-amber-50 text-amber-700 border-amber-100'
-                        : 'bg-green-50 text-green-700 border-green-100'
-                    }`}
-                  >
-                    {concept.status === 'needs_review' ? 'Needs Review' : 'Covered'}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xxs text-neutral-400 italic leading-relaxed">
-              No concepts explored in this session. Explanations will automatically populate mapping cards here.
-            </p>
-          )}
-        </div>
-
-        {/* Cited sources */}
-        <div className="space-y-3">
-          <div className="flex items-center gap-1 text-xxs font-bold text-neutral-400 uppercase tracking-widest">
-            <BookOpen size={12} className="text-emerald-800" />
-            <span>Cited Sources</span>
-          </div>
-
-          {activeThreadCitations.length > 0 ? (
-            <div className="grid grid-cols-1 gap-2">
-              {activeThreadCitations.map((cit, idx) => {
-                const resolved = getSlideFromCitation(cit.lecture, cit.slide);
-                if (!resolved) return null;
-                return (
-                  <button
-                    key={idx}
-                    onClick={() => handleSelectSlide(resolved.lecture, cit.slide)}
-                    className="w-full text-left p-2.5 rounded bg-neutral-50 border border-neutral-200/70 hover:bg-neutral-100 hover:border-neutral-300 transition-all text-xxs font-semibold text-neutral-700 flex items-center justify-between focus:outline-none"
-                  >
-                    <span>{formatSlideLocation(resolved.lecture, cit.slide)}</span>
-                    <span className="text-[10px] text-neutral-400 font-normal">View Slide →</span>
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="text-xxs text-neutral-400 italic leading-relaxed">
-              Grounding references will register when the tutor responds. Click them to inspect slide notes.
-            </p>
-          )}
-        </div>
-
-        {/* Demo reset toggle at the bottom */}
-        <div className="mt-auto pt-4 border-t border-neutral-100 space-y-3">
-          <div className="flex items-center gap-1 text-xxs font-bold text-neutral-400 uppercase tracking-widest">
-            <RotateCcw size={12} />
-            <span>Syllabus Sandbox</span>
-          </div>
-          <div className="bg-neutral-50 border border-neutral-200 p-3 rounded-lg flex flex-col gap-2">
-            <span className="text-[10px] text-neutral-500 leading-normal block">
-              Toggle between the pre-loaded student discussion and a fresh, empty onboarding state for assessment.
-            </span>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setUseEmptyState(false)}
-                className={`flex-1 text-center py-1.5 rounded text-xxs font-bold transition-all border ${
-                  !useEmptyState
-                    ? 'bg-white border-neutral-300 text-emerald-950 shadow-xs'
-                    : 'bg-transparent border-transparent text-neutral-400 hover:text-neutral-700'
-                }`}
-              >
-                Demo Thread
-              </button>
-              <button
-                onClick={() => setUseEmptyState(true)}
-                className={`flex-1 text-center py-1.5 rounded text-xxs font-bold transition-all border ${
-                  useEmptyState
-                    ? 'bg-white border-neutral-300 text-emerald-950 shadow-xs'
-                    : 'bg-transparent border-transparent text-neutral-400 hover:text-neutral-700'
-                }`}
-              >
-                Fresh Student
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  };
+  const contextPanel = (
+    <ContextPanel
+      currentConcept={currentConcept}
+      relatedConcepts={relatedConcepts}
+      citations={lastAssistant?.citations ?? []}
+      rememberLine={rememberLine}
+      contextPath={contextPath}
+      onConceptClick={handleConceptClick}
+      onCitationClick={(cit) => {
+        const r = getSlideFromCitation(cit.lecture, cit.slide);
+        if (r) handleSelectSlide(r.lecture, cit.slide);
+      }}
+      onNavigateRevision={() => setCurrentTab('revision')}
+    />
+  );
 
   return (
     <AppShell
       currentTab={currentTab}
       onNavigateTab={setCurrentTab}
-      progressPercentage={progressPercentage}
-      exploredCount={exploredCount}
-      totalConcepts={totalConcepts}
-      rightPanelContent={renderRightPanelContent()}
+      sourcePanel={sourcePanel}
       hasActiveSlide={!!activeSlide}
+      onCloseSource={() => setActiveSlide(null)}
       onSelectLectureSlide={handleSelectSlide}
+      onGoHome={handleGoHome}
+      contextPanel={contextPanel}
     >
       {currentTab === 'tutor' && (
         <TutorView
           messages={messages}
+          concepts={concepts}
           isStreaming={isStreaming}
           onSendMessage={handleSendMessage}
-          onStopGeneration={handleStopGeneration}
-          onRetryMessage={handleRetryMessage}
+          onStopGeneration={() => abortController?.abort()}
+          onRetryMessage={() => {
+            const users = messages.filter((m) => m.role === 'user');
+            if (!users.length) return;
+            const q = users[users.length - 1].content;
+            setMessages((p) => { const c = [...p]; c.pop(); c.pop(); return c; });
+            handleSendMessage(q);
+          }}
           onSelectSlide={handleSelectSlide}
+          onConceptClick={handleConceptClick}
+          onLoadDemo={handleLoadDemo}
         />
       )}
-
       {currentTab === 'map' && (
         <LearningMap
           concepts={concepts}
@@ -375,12 +201,13 @@ function App() {
           onSelectSlide={handleSelectSlide}
           onJumpToMessage={handleJumpToMessage}
           onNavigateToTab={setCurrentTab}
+          onConceptClick={handleConceptClick}
         />
       )}
-
       {currentTab === 'revision' && (
         <RevisionView
           concepts={concepts}
+          messages={messages}
           onSelectSlide={handleSelectSlide}
           onNavigateToTab={setCurrentTab}
         />
